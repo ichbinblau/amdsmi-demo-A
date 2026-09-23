@@ -115,6 +115,7 @@ docker run -d --name go122 \
   -e CGO_CFLAGS=-I/opt/goamdsmi/include \
   -e CGO_LDFLAGS=-L/opt/goamdsmi/lib \
   -e LD_LIBRARY_PATH=/opt/goamdsmi/lib \
+  -e GOFLAGS=-buildvcs=false \
   golang:1.22 sleep infinity
 
 # 可选：安装 libdrm，消除 "Fail to open libdrm_amdgpu.so.1" 警告
@@ -123,8 +124,13 @@ docker exec go122 bash -c 'apt-get update -qq && apt-get install -y -qq libdrm-a
 docker exec go122 bash -c 'cd /work && make run'
 ```
 
-注意：执行 `docker exec` 时用 `bash -c`，不要用 `bash -lc`。login shell 会重置
-`PATH`，导致找不到 `go`。
+注意：
+
+- 执行 `docker exec` 时用 `bash -c`，不要用 `bash -lc`。login shell 会重置 `PATH`，
+  导致找不到 `go`。
+- 容器以 root 运行，而挂载进来的 git 仓库属于宿主机用户，git 会拒绝读取，`go build`
+  报 `error obtaining VCS status`。`GOFLAGS=-buildvcs=false` 用来关闭 Go 的 VCS 信息
+  嵌入，从而避开这个问题。
 
 ### 预期输出
 
@@ -149,7 +155,5 @@ demo 只通过 amd-smi 读取遥测数据，不会在 GPU 上跑计算，也不�
 | `cannot find -lgoamdsmi_shim64` | `CGO_LDFLAGS` 没指向 shim 所在目录 |
 | 运行时报 `libgoamdsmi_shim64.so: cannot open shared object file` | `LD_LIBRARY_PATH` 里没有 shim 所在目录 |
 | `GO_gpu_init failed` | amdgpu 驱动未加载；或容器没有挂载 `/dev/kfd`、`/dev/dri`，没有加入 video/render 组 |
+| `error obtaining VCS status: exit status 128` | 容器里的 root 读不了宿主机用户的 git 仓库；设置 `GOFLAGS=-buildvcs=false` |
 | `goamdsmi.go:740 ... *[16][256]_Ctype_char` | 用的是 v0.1.0 或上游 develop，请升级到 v0.1.1 |
-
-`setup.sh` 和 `make setup` 是早期方案（本地 sparse clone 上游仓库 + `replace`）留下的，
-改用 `ichbinblau/goamdsmi` 后已经用不到了。
