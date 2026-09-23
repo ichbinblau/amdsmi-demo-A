@@ -14,123 +14,57 @@ go: ... create zip: module source tree too large (max size is 524288000 bytes)
 ```
 
 `ichbinblau/goamdsmi` 从 develop（commit `820ea79`）中只抽取了 Go binding 和 C shim
-源码，作为独立模块发布，包名仍为 `goamdsmi`。v0.1.1 修复了上游一处 cgo 编译错误，
-详见该仓库 README。
+源码，作为独立模块发布，包名仍为 `goamdsmi`。相对上游做了两处修复：一处 cgo 编译错误，
+以及让 shim 同时兼容 amd-smi 26.x（ROCm 7.1 / 7.2）和 27.x。详见该仓库 README。
 
 ## 前置条件
 
-- 装有 amdgpu 驱动和 ROCm 的主机（已在 MI355X + ROCm 7.1.1 上验证）
-- Go ≥ 1.21，并开启 `CGO_ENABLED=1`
-- gcc
-- **cgo shim**：`amdsmi_go_shim.h` 和 `libgoamdsmi_shim64.so`
+- 装有 amdgpu 驱动和 ROCm（含 amd-smi 头文件和 `libamd_smi.so`）的主机。
+  已在 MI355X + ROCm 7.1.1 上验证
+- 以下二选一：
+  - 宿主机上装有 Go ≥ 1.21、gcc 和 make
+  - Docker（宿主机不需要装 Go）
 
-cgo 链接的是 `libgoamdsmi_shim64.so`，该库再调用 `libamd_smi.so`。标准 ROCm 安装
-**不带**这个 shim，需要自己编译（见下一节）。
+cgo 链接的是 `libgoamdsmi_shim64.so`（shim），该库再调用 `libamd_smi.so`。标准 ROCm
+安装**不带** shim。`make run` 会自动用 `go.mod` 中锁定版本的 goamdsmi 源码编译 shim，
+输出到 `.shim/`，不需要手动编译。
 
-## 1. 编译 shim
-
-shim 源码在 goamdsmi 仓库的 `goamdsmi_shim/smiwrapper/` 目录下：
-
-```bash
-git clone https://github.com/ichbinblau/goamdsmi.git
-cd goamdsmi/goamdsmi_shim/smiwrapper
-
-mkdir -p ~/goamdsmi-shim/{include,lib}
-gcc -shared -fPIC -O2 -DENABLE_DEBUG_LEVEL=0 \
-    -o ~/goamdsmi-shim/lib/libgoamdsmi_shim64.so amdsmi_go_shim.c \
-    -I. -I/opt/rocm/include -L/opt/rocm/lib -lamd_smi -Wl,-rpath,/opt/rocm/lib
-cp amdsmi_go_shim.h goamdsmi.h ~/goamdsmi-shim/include/
-```
-
-> **ROCm 版本注意**：shim 来自 develop 分支，用到了一些较新的 amd-smi API
-> （UMA carveout、TTM 等）。如果本机 ROCm 较旧（例如 7.1.1），编译会报
-> `implicit declaration` / `unknown type`：
->
-> - `amdsmi_get_processor_handles_by_type`：7.1.1 的库里有这个符号，但头文件里的
->   声明被 `#ifdef ENABLE_ESMI_LIB` 挡住了。在 `amdsmi_go_shim.c` 中手动补一个函数
->   原型即可。
-> - `goamdsmi_gpu_uma_carveout_*` 和 `goamdsmi_ttm_*`：7.1.1 中没有对应 API，把这几个
->   函数体改成直接 `return -1;`。
->
-> 这样修改后的 shim 只适用于本机；只要不调用上述函数，其余接口都能正常工作。
-
-## 2. 在自己的项目里使用 goamdsmi
-
-```bash
-go get github.com/ichbinblau/goamdsmi@v0.1.1
-```
-
-```go
-import "github.com/ichbinblau/goamdsmi"
-
-if !goamdsmi.GO_gpu_init() {
-    // 驱动未加载或找不到 libamd_smi.so
-}
-defer goamdsmi.GO_gpu_shutdown()
-
-n := int(goamdsmi.GO_gpu_num_monitor_devices())
-for i := 0; i < n; i++ {
-    sclk  := uint64(goamdsmi.GO_gpu_dev_gpu_clk_freq_get_sclk(i)) // Hz
-    busy  := uint32(goamdsmi.GO_gpu_dev_gpu_busy_percent_get(i))  // %
-    power := uint64(goamdsmi.GO_gpu_dev_power_get(i))             // 微瓦
-    _, _, _ = sclk, busy, power
-}
-```
-
-getter 的返回值是 C 数值类型，需要在调用处转换成 Go 类型（如上所示）。
-
-编译和运行时，要让 cgo 找到 shim：
-
-```bash
-export CGO_ENABLED=1
-export CGO_CFLAGS="-I$HOME/goamdsmi-shim/include"
-export CGO_LDFLAGS="-L$HOME/goamdsmi-shim/lib"
-export LD_LIBRARY_PATH="$HOME/goamdsmi-shim/lib:$LD_LIBRARY_PATH"
-```
-
-如果把 shim 安装到 `/opt/rocm/include` 和 `/opt/rocm/lib`，就不需要设置
-`CGO_CFLAGS` 和 `CGO_LDFLAGS`（goamdsmi 默认搜索这两个路径）。
-
-## 3. 运行本 demo
+## 快速开始
 
 ### 方式 A：在宿主机上运行
 
 ```bash
-# 设置好上一节的环境变量，然后：
+git clone https://github.com/ichbinblau/amdsmi-demo-A.git
+cd amdsmi-demo-A
 make run
 ```
 
-`make check` 只检查 `/opt/rocm` 下有没有 shim。如果 shim 放在别的目录，这项检查会
-报 MISSING，可以忽略，`make run` 不依赖它。
-
-### 方式 B：在 Docker 里运行（宿主机不需要装 Go）
+### 方式 B：在 Docker 里运行
 
 ```bash
+git clone https://github.com/ichbinblau/amdsmi-demo-A.git
+cd amdsmi-demo-A
+
 docker run -d --name go122 \
+  --user $(id -u):$(id -g) -e HOME=/tmp \
   --device=/dev/kfd --device=/dev/dri \
   --group-add video --group-add $(getent group render | cut -d: -f3) \
   -v /opt/rocm:/opt/rocm:ro \
-  -v $HOME/goamdsmi-shim:/opt/goamdsmi:ro \
   -v $PWD:/work -w /work \
-  -e CGO_CFLAGS=-I/opt/goamdsmi/include \
-  -e CGO_LDFLAGS=-L/opt/goamdsmi/lib \
-  -e LD_LIBRARY_PATH=/opt/goamdsmi/lib \
-  -e GOFLAGS=-buildvcs=false \
   golang:1.22 sleep infinity
 
-# 可选：安装 libdrm，消除 "Fail to open libdrm_amdgpu.so.1" 警告
-docker exec go122 bash -c 'apt-get update -qq && apt-get install -y -qq libdrm-amdgpu1'
-
-docker exec go122 bash -c 'cd /work && make run'
+docker exec go122 make run
 ```
 
-注意：
+- `--user $(id -u):$(id -g)` 让容器以宿主机用户身份运行。这样生成的 `bin/`、`.shim/`
+  归你所有；git 也不会因为仓库属主不同而拒绝读取（否则 `go build` 会报
+  `error obtaining VCS status`）。`HOME=/tmp` 为 Go 的构建缓存提供一个可写目录。
+- 可选：golang 镜像里没有 libdrm，运行时会打印 `Fail to open libdrm_amdgpu.so.1`
+  警告，但不影响结果。如需消除警告，以 root 身份安装：
 
-- 执行 `docker exec` 时用 `bash -c`，不要用 `bash -lc`。login shell 会重置 `PATH`，
-  导致找不到 `go`。
-- 容器以 root 运行，而挂载进来的 git 仓库属于宿主机用户，git 会拒绝读取，`go build`
-  报 `error obtaining VCS status`。`GOFLAGS=-buildvcs=false` 用来关闭 Go 的 VCS 信息
-  嵌入，从而避开这个问题。
+  ```bash
+  docker exec -u 0 go122 bash -c 'apt-get update -qq && apt-get install -y -qq libdrm-amdgpu1'
+  ```
 
 ### 预期输出
 
@@ -147,13 +81,78 @@ GPU 0
 
 demo 只通过 amd-smi 读取遥测数据，不会在 GPU 上跑计算，也不占用显存。
 
+## Makefile 目标
+
+| 目标 | 作用 |
+|---|---|
+| `make run` | 编译 shim（如需要）和 demo，然后运行 |
+| `make shim` | 只编译 shim，输出到 `.shim/{include,lib}`。`go.mod` 改动后会重新编译 |
+| `make check` | 检查 ROCm amd-smi 和 shim 是否存在 |
+| `make clean` | 删除 `bin/` 和 `.shim/` |
+
+可覆盖的变量：`ROCM`（默认 `/opt/rocm`）、`SHIM`（默认 `./.shim`）。
+
+## 在自己的项目里使用 goamdsmi
+
+1. 添加依赖：
+
+   ```bash
+   go get github.com/ichbinblau/goamdsmi@latest
+   ```
+
+2. 编译 shim：最简单的做法是把本仓库 `Makefile` 里的 `shim` 目标和 `CGO_*` /
+   `LD_LIBRARY_PATH` 几行复制过去。也可以手动编译（在你的模块目录下执行）：
+
+   ```bash
+   SRC=$(go list -m -f '{{.Dir}}' github.com/ichbinblau/goamdsmi)/goamdsmi_shim/smiwrapper
+   SHIM=$HOME/goamdsmi-shim
+   mkdir -p $SHIM/include $SHIM/lib
+   gcc -shared -fPIC -O2 -DENABLE_DEBUG_LEVEL=0 \
+       -o $SHIM/lib/libgoamdsmi_shim64.so $SRC/amdsmi_go_shim.c \
+       -I$SRC -I/opt/rocm/include -L/opt/rocm/lib -lamd_smi -Wl,-rpath,/opt/rocm/lib
+   cp $SRC/amdsmi_go_shim.h $SRC/goamdsmi.h $SHIM/include/
+
+   export CGO_ENABLED=1
+   export CGO_CFLAGS="-I$SHIM/include"
+   export CGO_LDFLAGS="-L$SHIM/lib"
+   export LD_LIBRARY_PATH="$SHIM/lib:$LD_LIBRARY_PATH"
+   ```
+
+3. 调用示例：
+
+   ```go
+   import "github.com/ichbinblau/goamdsmi"
+
+   if !goamdsmi.GO_gpu_init() {
+       // 驱动未加载或找不到 libamd_smi.so
+   }
+   defer goamdsmi.GO_gpu_shutdown()
+
+   n := int(goamdsmi.GO_gpu_num_monitor_devices())
+   for i := 0; i < n; i++ {
+       sclk  := uint64(goamdsmi.GO_gpu_dev_gpu_clk_freq_get_sclk(i)) // Hz
+       busy  := uint32(goamdsmi.GO_gpu_dev_gpu_busy_percent_get(i))  // %
+       power := uint64(goamdsmi.GO_gpu_dev_power_get(i))             // 微瓦
+       _, _, _ = sclk, busy, power
+   }
+   ```
+
+   getter 的返回值是 C 数值类型，需要在调用处转换成 Go 类型（如上所示）。
+
+   在 amd-smi 26.x（ROCm 7.1 / 7.2）上，UMA carveout 和 TTM 相关函数
+   （`GO_gpu_uma_carveout_*`、`GO_ttm_*`）会直接返回 `-1`，因为这个版本的 amd-smi
+   没有对应 API。
+
 ## 常见问题
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| `fatal error: amdsmi_go_shim.h: No such file or directory` | 没有 shim，或 `CGO_CFLAGS` 没指向 shim 头文件 |
+| `fatal error: amdsmi_go_shim.h: No such file or directory` | 还没编译 shim，或 `CGO_CFLAGS` 没指向 shim 头文件。在本仓库里执行 `make run` 会自动编译 |
 | `cannot find -lgoamdsmi_shim64` | `CGO_LDFLAGS` 没指向 shim 所在目录 |
 | 运行时报 `libgoamdsmi_shim64.so: cannot open shared object file` | `LD_LIBRARY_PATH` 里没有 shim 所在目录 |
+| `fatal error: amd_smi/amdsmi.h: No such file or directory` | ROCm 不在 `/opt/rocm`（可用 `make ROCM=/path/to/rocm run` 指定），或 Docker 没挂载 `/opt/rocm` |
 | `GO_gpu_init failed` | amdgpu 驱动未加载；或容器没有挂载 `/dev/kfd`、`/dev/dri`，没有加入 video/render 组 |
-| `error obtaining VCS status: exit status 128` | 容器里的 root 读不了宿主机用户的 git 仓库；设置 `GOFLAGS=-buildvcs=false` |
-| `goamdsmi.go:740 ... *[16][256]_Ctype_char` | 用的是 v0.1.0 或上游 develop，请升级到 v0.1.1 |
+| `error obtaining VCS status: exit status 128` | 容器以 root 身份读取宿主机用户的 git 仓库被拒。按上面的命令加 `--user $(id -u):$(id -g)` |
+| `go: command not found`（`docker exec ... bash -lc`） | login shell 会重置 `PATH`，改用 `bash -c` 或直接 `docker exec go122 make run` |
+| `goamdsmi.go:740 ... *[16][256]_Ctype_char` | 用的是 goamdsmi v0.1.0 或上游 develop，请升级到 v0.1.1 及以上 |
+| shim 编译报 `processor_type_t` / `amdsmi_uma_carveout_info_t` 等错误 | 用的是 goamdsmi v0.1.1 及以下，shim 不兼容 amd-smi 26.x，请升级到 v0.1.2 及以上 |
